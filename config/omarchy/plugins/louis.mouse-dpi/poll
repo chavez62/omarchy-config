@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Dump libratbag mouse DPI state as JSON for the Omarchy bar widget."""
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+
+
+def run(cmd, timeout=6):
+    try:
+        return subprocess.check_output(
+            cmd, text=True, stderr=subprocess.DEVNULL, timeout=timeout
+        )
+    except Exception:
+        return ""
+
+
+def list_devices():
+    """ratbagctl list -> [(short_name, description)]"""
+    devices = []
+    for line in run(["ratbagctl", "list"]).splitlines():
+        if ":" not in line:
+            continue
+        short, _, desc = line.partition(":")
+        short = short.strip()
+        if short:
+            devices.append((short, desc.strip()))
+    return devices
+
+
+def short_name(name):
+    text = re.sub(r"^Logitech\s+", "", (name or "").strip(), flags=re.I)
+    text = re.sub(r"\s+Gaming Mouse$", "", text, flags=re.I)
+    return text or "Mouse"
+
+
+def parse_resolutions(info):
+    """Pull the stage list out of the first profile block that has one."""
+    stages = []
+    in_res = False
+    for line in info.splitlines():
+        if re.match(r"^\s*Resolutions:\s*$", line):
+            in_res = True
+            continue
+        if in_res:
+            m = re.match(r"^\s*(\d+):\s*(\d+)dpi(.*)$", line)
+            if m:
+                stages.append({
+                    "index": int(m.group(1)),
+                    "dpi": int(m.group(2)),
+                    "default": "(default)" in m.group(3),
+                })
+                continue
+            if stages:
+                break
+            in_res = False
+    return stages
+
+
+def parse_int(raw):
+    m = re.search(r"(\d+)", raw or "")
+    return int(m.group(1)) if m else None
+
+
+def collect(short, desc):
+    info = run(["ratbagctl", short, "info"])
+    if not info:
+        return None
+    stages = parse_resolutions(info)
+    active = parse_int(run(["ratbagctl", short, "resolution", "active", "get"]))
+    dpi = parse_int(run(["ratbagctl", short, "dpi", "get"]))
+    rate = parse_int(run(["ratbagctl", short, "rate", "get"]))
+
+    # Fall back to the stage table when `dpi get` is unavailable.
+    if dpi is None and active is not None:
+        for stage in stages:
+            if stage["index"] == active:
+                dpi = stage["dpi"]
+                break
+
+    buttons = parse_int(
+        next((l for l in info.splitlines() if "Number of Buttons" in l), "")
+    )
+
+    return {
+        "id": short,
+        "name": short_name(desc),
+        "dpi": dpi,
+        "activeIndex": active,
+        "rate": rate,
+        "buttons": buttons,
+        "stages": stages,
+    }
+
+
+def main():
+    if not shutil.which("ratbagctl"):
+        json.dump({"devices": [], "error": "ratbagctl not installed"}, sys.stdout)
+        sys.stdout.write("\n")
+        return
+
+    devices = []
+    for short, desc in list_devices():
+        entry = collect(short, desc)
+        if entry and entry.get("dpi") is not None:
+            devices.append(entry)
+
+    json.dump({"devices": devices}, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

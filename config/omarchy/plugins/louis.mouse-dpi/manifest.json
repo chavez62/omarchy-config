@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "louis.mouse-dpi",
+  "name": "Mouse DPI",
+  "version": "1.0.0",
+  "author": "louis",
+  "description": "Live DPI and polling rate for libratbag gaming mice",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "DpiService.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Mouse DPI",
+    "description": "Current DPI stage on the bar, click to switch",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

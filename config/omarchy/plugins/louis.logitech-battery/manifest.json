@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "louis.logitech-battery",
+  "name": "Logitech Battery",
+  "version": "1.1.0",
+  "author": "louis",
+  "description": "Live battery for Logitech wireless mice and headsets",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "BatteryService.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Logitech Battery",
+    "description": "Mouse and headset battery on the bar",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

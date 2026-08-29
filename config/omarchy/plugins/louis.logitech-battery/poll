@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Dump Logitech mouse/headset battery as JSON for the Omarchy bar widget."""
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+
+
+def run(cmd, timeout=6):
+    try:
+        return subprocess.check_output(
+            cmd, text=True, stderr=subprocess.DEVNULL, timeout=timeout
+        )
+    except Exception:
+        return ""
+
+
+def parse_percentage(raw):
+    match = re.search(r"(-?\d+(?:\.\d+)?)", raw or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    if value < 0:
+        return None
+    return int(round(value))
+
+
+def short_name(name, kind):
+    text = (name or "").strip()
+    text = re.sub(r"^Logitech\s+", "", text, flags=re.I)
+    if "G733" in text or "G633" in text or "G635" in text or "G933" in text or "G935" in text:
+        return "G733"
+    text = re.sub(r"\s+Gaming Headset$", "", text, flags=re.I)
+    return text or kind.replace("_", " ").title()
+
+
+def infer_kind(kind, name):
+    text = (name or "").lower()
+    if "mouse" in text:
+        return "mouse"
+    if "keyboard" in text or "keyb" in text:
+        return "keyboard"
+    if "headset" in text or "headphone" in text:
+        return "headset"
+    return kind or "peripheral"
+
+
+def identity_key(device):
+    serial = (device.get("serial") or "").strip().lower()
+    if serial:
+        return "serial:" + serial
+    name = re.sub(r"[^a-z0-9]+", " ", (device.get("name") or "").lower())
+    name = re.sub(r"\b(logitech|wireless|gaming|mouse|keyboard|headset|headphones)\b", "", name)
+    name = " ".join(name.split())
+    return "name:" + (name or device.get("id") or "")
+
+
+def quality(device):
+    score = 0
+    state = device.get("state") or "unknown"
+    if state not in ("unknown", ""):
+        score += 10
+    if state in ("charging", "discharging", "fully_charged"):
+        score += 5
+    if device.get("present"):
+        score += 2
+    if device.get("percentage") is not None:
+        score += 2
+    score += min(len(device.get("name") or ""), 40)
+    return score
+
+
+def prefer(left, right):
+    winner = right if quality(right) > quality(left) else left
+    other = left if winner is right else right
+    if len(other.get("name") or "") > len(winner.get("name") or ""):
+        winner = dict(winner)
+        winner["name"] = other["name"]
+    if winner.get("kind") in ("keyboard", "peripheral") and infer_kind(winner.get("kind"), winner.get("name")) == "mouse":
+        winner = dict(winner)
+        winner["kind"] = "mouse"
+    return winner
+
+
+def dedupe(devices):
+    chosen = {}
+    order = []
+    for device in devices:
+        key = identity_key(device)
+        if key not in chosen:
+            chosen[key] = device
+            order.append(key)
+        else:
+            chosen[key] = prefer(chosen[key], device)
+    return [chosen[key] for key in order]
+
+
+def parse_upower():
+    devices = []
+    for path in run(["upower", "-e"]).splitlines():
+        path = path.strip()
+        if not path or path.endswith("DisplayDevice"):
+            continue
+        info = run(["upower", "-i", path])
+        if not info:
+            continue
+
+        fields = {}
+        kind = ""
+        for line in info.splitlines():
+            keyed = re.match(r"^\s+([A-Za-z0-9 _-]+):\s+(.*)$", line)
+            if keyed:
+                key = keyed.group(1).strip().lower().replace(" ", "_").replace("-", "_")
+                fields[key] = keyed.group(2).strip()
+                continue
+            typed = re.match(r"^\s+([a-z][a-z0-9_-]*)\s*$", line)
+            if typed:
+                kind = typed.group(1).replace("-", "_")
+
+        if fields.get("power_supply") == "yes":
+            continue
+
+        model = fields.get("model") or ""
+        native = fields.get("native_path") or path
+        logitech = "logitech" in model.lower() or "hidpp" in native.lower()
+        if kind not in ("mouse", "keyboard", "headset", "headphones", "gaming_input") and not logitech:
+            continue
+
+        percentage = parse_percentage(fields.get("percentage", ""))
+        present = fields.get("present", "yes").lower() == "yes"
+        if percentage is None and not present:
+            continue
+
+        name = short_name(model, kind or "peripheral")
+        devices.append({
+            "id": native,
+            "kind": infer_kind(kind or "peripheral", model or name),
+            "name": name,
+            "serial": fields.get("serial") or "",
+            "percentage": percentage,
+            "state": (fields.get("state") or "unknown").replace("-", "_"),
+            "present": present,
+            "minutes": None,
+            "source": "upower",
+        })
+    return devices
+
+
+def parse_headsetcontrol():
+    if not shutil.which("headsetcontrol"):
+        return []
+    raw = run(["headsetcontrol", "-o", "json"], timeout=8)
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    devices = []
+    for item in payload.get("devices") or []:
+        battery = item.get("battery") or {}
+        status = battery.get("status") or "BATTERY_UNAVAILABLE"
+        level = battery.get("level")
+        present = status != "BATTERY_UNAVAILABLE"
+        charging = status == "BATTERY_CHARGING"
+        product = item.get("product") or item.get("device") or "Headset"
+        vendor = item.get("id_vendor") or ""
+        product_id = item.get("id_product") or ""
+        minutes = battery.get("time_to_empty_min")
+        if not isinstance(minutes, (int, float)) or minutes < 0:
+            minutes = None
+        else:
+            minutes = int(round(minutes))
+        percentage = None
+        if isinstance(level, (int, float)) and level >= 0:
+            percentage = int(round(level))
+        devices.append({
+            "id": f"headsetcontrol:{vendor}:{product_id}",
+            "kind": "headset",
+            "name": short_name(product, "headset"),
+            "serial": item.get("serial") or "",
+            "percentage": percentage,
+            "state": "charging" if charging else ("discharging" if present else "unavailable"),
+            "present": present,
+            "minutes": minutes if present and not charging else None,
+            "source": "headsetcontrol",
+        })
+    return devices
+
+
+def merge(upower_devices, headset_devices):
+    if not headset_devices:
+        return dedupe(upower_devices)
+    kept = [d for d in upower_devices if d.get("kind") not in ("headset", "headphones")]
+    return dedupe(kept) + headset_devices
+
+
+def main():
+    devices = merge(parse_upower(), parse_headsetcontrol())
+    json.dump({"devices": devices}, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
